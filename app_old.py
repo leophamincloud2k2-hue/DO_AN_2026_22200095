@@ -155,9 +155,14 @@ def format_confidence(conf_val):
 
 # ═══════════════════════════════════════════════════════════
 # 4. GIAO DIỆN CHÍNH
-# ═══════════════════════════════════════════════════════════
-st.markdown("<h1 style='text-align: center; color: #1abc9c;'> Song Key Finder</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; color: #bdc3c7; font-size:18px;'>Analyzer by AI to find the key of any song</p>", unsafe_allow_html=True)
+# Dùng Flexbox ép canh giữa tuyệt đối, bỏ qua Anchor Link mặc định của Streamlit
+st.markdown("""
+    <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; margin-bottom: 20px;">
+        <div style="font-size: 3.5rem; font-weight: bold; color: #1abc9c; margin: 0; padding: 0; line-height: 1.2;">Song Key Finder</div>
+        <div style="font-size: 18px; color: #bdc3c7; margin-top: 10px;">Analyzer by AI to find the key of any song</div>
+    </div>
+    <hr style="border: 0.5px solid #2d2d44; margin-bottom: 30px;">
+""", unsafe_allow_html=True)
 st.write("---")
 
 if model is None:
