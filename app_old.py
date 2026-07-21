@@ -156,7 +156,7 @@ def format_confidence(conf_val):
 # ═══════════════════════════════════════════════════════════
 # 4. GIAO DIỆN CHÍNH
 # ═══════════════════════════════════════════════════════════
-st.markdown("<h1 style='text-align: center; color: #1abc9c;'>Song Key Finder</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center; color: #1abc9c;'> Song Key Finder</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center; color: #bdc3c7; font-size:18px;'>Analyzer by AI to find the key of any song</p>", unsafe_allow_html=True)
 st.write("---")
 
