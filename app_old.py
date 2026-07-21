@@ -3,44 +3,79 @@ import numpy as np
 import torch
 import torch.nn as nn
 import librosa
-import librosa.display
-# --- THÊM 2 DÒNG NÀY VÀO ---
-import matplotlib
-matplotlib.use('Agg')  # Bắt buộc Matplotlib vẽ ở chế độ "ẩn" dành cho Server Web
-# ---------------------------
-import matplotlib.pyplot as plt
 import os
-
-# --- THUỐC GIẢI TRỊ LỖI WINERROR 10054 TRÊN WINDOWS ---
 import sys
 import asyncio
 
+# --- THUỐC GIẢI TRỊ LỖI WINERROR 10054 TRÊN WINDOWS ---
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 # -----------------------------------------------------
 
 # ═══════════════════════════════════════════════════════════
-# 1. CẤU HÌNH GIAO DIỆN WEB
+# 1. CẤU HÌNH GIAO DIỆN WEB & CSS BẢNG (UI/UX)
 # ═══════════════════════════════════════════════════════════
-st.set_page_config(page_title="AI Key Detector", page_icon="🎵", layout="centered")
+st.set_page_config(page_title="Song Key Finder", page_icon="🎵", layout="wide")
 
-st.title("🎵 AI Music Key Detector")
+# Tiêm CSS Custom để làm bảng giống y hệt thiết kế
 st.markdown("""
-**Chào mừng đến với hệ thống nhận diện Tone nhạc bằng Trí tuệ Nhân tạo!**
-Hệ thống sử dụng mạng nơ-ron tích chập hồi quy (CRNN) để phân tích tần số âm thanh.
-""")
+<style>
+    /* Bảng hiển thị kết quả */
+    .styled-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 25px 0;
+        font-size: 16px;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        text-align: center;
+        color: #ffffff;
+        background-color: #1a1a2e;
+        box-shadow: 0 0 20px rgba(0, 0, 0, 0.15);
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    .styled-table thead tr {
+        background-color: #7b61ff; /* Màu tím theo ảnh */
+        color: #ffffff;
+        text-align: center;
+        font-weight: bold;
+    }
+    .styled-table th, .styled-table td {
+        padding: 15px 20px;
+    }
+    .styled-table tbody tr {
+        border-bottom: 1px solid #2d2d44;
+        background-color: #1e1e32;
+    }
+    .styled-table tbody tr:nth-of-type(even) {
+        background-color: #25253b;
+    }
+    .styled-table tbody tr:hover {
+        background-color: #33334c;
+        transition: 0.3s;
+    }
+    .tone-highlight {
+        font-weight: bold;
+        color: #00d2d3;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Khởi tạo bộ nhớ (Session State) để lưu lại các bài hát đã phân tích
+if 'analyzed_files' not in st.session_state:
+    st.session_state.analyzed_files = {}
 
 # ═══════════════════════════════════════════════════════════
-# 2. ĐỊNH NGHĨA MẠNG CRNN & NHÃN (PHIÊN BẢN CŨ 13 FEATURES)
+# 2. ĐỊNH NGHĨA MẠNG CRNN & NHÃN (13 FEATURES)
 # ═══════════════════════════════════════════════════════════
 TONE_CLASSES = [
-    "C_Major",  "Db_Major", "D_Major",  "Eb_Major", "E_Major",  "F_Major",
-    "F#_Major", "G_Major",  "Ab_Major", "A_Major",  "Bb_Major", "B_Major",
-    "C_Minor",  "C#_Minor", "D_Minor",  "Eb_Minor", "E_Minor",  "F_Minor",
-    "F#_Minor", "G_Minor",  "G#_Minor", "A_Minor",  "Bb_Minor", "B_Minor",
+    "C Major",  "Db Major", "D Major",  "Eb Major", "E Major",  "F Major",
+    "F# Major", "G Major",  "Ab Major", "A Major",  "Bb Major", "B Major",
+    "C Minor",  "C# Minor", "D Minor",  "Eb Minor", "E Minor",  "F Minor",
+    "F# Minor", "G Minor",  "G# Minor", "A Minor",  "Bb Minor", "B Minor",
 ]
 N_CLASSES = len(TONE_CLASSES)
-MODEL_PATH = "key_detector_crnn_fullbai_v2.pth"  # Đảm bảo file này nằm cùng thư mục
+MODEL_PATH = "key_detector_crnn_fullbai_v2.pth"
 
 class KeyCRNN(nn.Module):
     def __init__(self):
@@ -54,7 +89,7 @@ class KeyCRNN(nn.Module):
             nn.MaxPool2d(kernel_size=(1, 2)),
         )
         self.rnn = nn.LSTM(
-            input_size=64 * 3, # <--- ĐÃ HẠ CẤP VỀ 64*3 CHO 13 FEATURES
+            input_size=64 * 3, 
             hidden_size=128, num_layers=2, batch_first=True,
             bidirectional=True, dropout=0.3,
         )
@@ -74,7 +109,6 @@ class KeyCRNN(nn.Module):
         x = x.mean(dim=1)                     
         return self.head(x)
 
-# Cache model để không phải load lại mỗi khi ấn nút trên Web
 @st.cache_resource
 def load_model():
     if not os.path.exists(MODEL_PATH):
@@ -88,81 +122,112 @@ def load_model():
 model = load_model()
 
 # ═══════════════════════════════════════════════════════════
-# 3. HÀM TRÍCH XUẤT ĐẶC TRƯNG DSP (PHIÊN BẢN CŨ 13 FEATURES)
+# 3. HÀM XỬ LÝ DSP & FORMAT SỐ LIỆU
 # ═══════════════════════════════════════════════════════════
 def process_audio(file_bytes):
-    # Load audio từ bộ nhớ tạm (upload), cắt 60s để test Web nhanh
-    y, sr = librosa.load(file_bytes, sr=22050, mono=True, duration=60) 
-    
+    # Rút gọn lại, bỏ hoàn toàn Matplotlib
+    y, sr = librosa.load(file_bytes, sr=22050, mono=True, duration=30) 
     y_harm = librosa.effects.harmonic(y, margin=4)
     
-    # DSP: Trích xuất 13 Features (12 Chroma + 1 Mel)
     chroma_full = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=512, bins_per_octave=36)
     mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, hop_length=512)
     mel_mean = librosa.power_to_db(mel, ref=np.max).mean(axis=0, keepdims=True)
     
-    # Gộp lại (chỉ 13 dòng)
     feat = np.concatenate([chroma_full, mel_mean], axis=0).astype(np.float32)
-    
     for i in range(feat.shape[0]):
         mn, mx = feat[i].min(), feat[i].max()
         if mx > mn: 
             feat[i] = (feat[i] - mn) / (mx - mn)
-    feat = feat.T 
-    
-    return feat, chroma_full
+    return feat.T 
+
+def format_confidence(conf_val):
+    """
+    Hàm làm tròn thông minh:
+    - Nếu >= 99.9% -> Lấy 99.9%
+    - Còn lại: Lấy tối đa 5 số sau dấu phẩy, tự động cắt bỏ các số 0 vô nghĩa ở đuôi
+    """
+    if conf_val >= 99.9:
+        return "99.9%"
+    else:
+        # Format 5 số thập phân, sau đó rstrip cắt bỏ số 0 và dấu . dư thừa
+        formatted = f"{conf_val:.5f}".rstrip('0').rstrip('.')
+        return f"{formatted}%"
 
 # ═══════════════════════════════════════════════════════════
-# 4. GIAO DIỆN TƯƠNG TÁC
+# 4. GIAO DIỆN CHÍNH
 # ═══════════════════════════════════════════════════════════
+st.markdown("<h1 style='text-align: center; color: #1abc9c;'>Song Key Finder</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: #bdc3c7; font-size:18px;'>Analyzer by AI to find the key of any song</p>", unsafe_allow_html=True)
+st.write("---")
+
 if model is None:
-    st.error(f"❌ Không tìm thấy file model: {MODEL_PATH}. Vui lòng copy file .pth vào cùng thư mục với app.py!")
+    st.error(f"❌ Không tìm thấy file model: {MODEL_PATH}")
 else:
-    uploaded_file = st.file_uploader("📂 Tải lên bài hát (Định dạng: WAV, MP3)", type=["wav", "mp3"])
+    # Cho phép tải lên nhiều file cùng lúc
+    uploaded_files = st.file_uploader("Thêm file âm thanh (Add tracks)", type=["wav", "mp3"], accept_multiple_files=True)
 
-    if uploaded_file is not None:
-        st.audio(uploaded_file, format='audio/wav')
+    if uploaded_files:
+        for file in uploaded_files:
+            # Chỉ phân tích những file chưa có trong bộ nhớ tạm
+            if file.name not in st.session_state.analyzed_files:
+                with st.spinner(f"⏳ Đang phân tích: {file.name}..."):
+                    try:
+                        feat = process_audio(file)
+                        x = torch.tensor(feat).unsqueeze(0).float()   
+                        
+                        with torch.no_grad():
+                            probs = torch.softmax(model(x), dim=1)[0]
+                        
+                        top2_prob, top2_idx = torch.topk(probs, 2)
+                        
+                        top1_name = TONE_CLASSES[top2_idx[0].item()]
+                        top1_conf = top2_prob[0].item() * 100
+                        
+                        top2_name = TONE_CLASSES[top2_idx[1].item()]
+                        top2_conf = top2_prob[1].item() * 100
+                        
+                        # Lưu kết quả vào bộ nhớ
+                        st.session_state.analyzed_files[file.name] = {
+                            "top1_name": top1_name,
+                            "top1_conf": format_confidence(top1_conf),
+                            "top2_name": top2_name,
+                            "top2_conf": format_confidence(top2_conf)
+                        }
+                    except Exception as e:
+                        st.error(f"Lỗi khi đọc file {file.name}: {e}")
+
+    # Nếu đã có dữ liệu trong bộ nhớ, tiến hành vẽ Bảng HTML
+    if st.session_state.analyzed_files:
+        st.markdown("<br>", unsafe_allow_html=True) # Tạo khoảng trống
         
-        if st.button("🚀 Bắt đầu Phân tích Tone", use_container_width=True):
-            with st.spinner("⏳ Đang xử lý DSP và chạy AI phân tích..."):
-                try:
-                    # Chạy DSP
-                    feat, chroma_plot = process_audio(uploaded_file)
-                    
-                    # Chạy Model Inference
-                    x = torch.tensor(feat).unsqueeze(0).float()   
-                    with torch.no_grad():
-                        logits = model(x)
-                        probs = torch.softmax(logits, dim=1)[0]
-                    
-                    # Lấy kết quả Top 1 và Top 2
-                    top2_prob, top2_idx = torch.topk(probs, 2)
-                    
-                    pred_tone_1 = TONE_CLASSES[top2_idx[0].item()]
-                    conf_1 = top2_prob[0].item() * 100
-                    
-                    pred_tone_2 = TONE_CLASSES[top2_idx[1].item()]
-                    conf_2 = top2_prob[1].item() * 100
-
-                    # Hiển thị Kết quả
-                    st.success("✅ Phân tích hoàn tất!")
-                    st.markdown("### 🏆 Kết quả Nhận diện:")
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.info(f"**Top 1:** {pred_tone_1}\n\n**Độ tin cậy:** {conf_1:.1f}%")
-                    with col2:
-                        st.warning(f"**Top 2 (Dự phòng):** {pred_tone_2}\n\n**Độ tin cậy:** {conf_2:.1f}%")
-
-                   # Vẽ đồ thị biểu diễn phổ âm nhạc
-                    st.markdown("### 📊 Bản đồ Đặc trưng Tần số (Chromagram)")
-                    fig, ax = plt.subplots(figsize=(10, 4))
-                    img = librosa.display.specshow(chroma_plot, y_axis='chroma', x_axis='time', ax=ax, cmap='coolwarm')
-                    fig.colorbar(img, ax=ax)
-                    st.pyplot(fig)
-                    
-                    # --- THÊM DÒNG NÀY ĐỂ TRÁNH TRÀN RAM ---
-                    plt.close(fig)
-
-                except Exception as e:
-                    st.error(f"❌ Xảy ra lỗi trong quá trình phân tích: {e}")
+        # Bắt đầu chuỗi HTML tạo bảng
+        table_html = """
+        <table class="styled-table">
+            <thead>
+                <tr>
+                    <th>File</th>
+                    <th>Top 1 Key</th>
+                    <th>Top 2 Key</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+        
+        # Duyệt qua các bài hát đã lưu và điền vào hàng
+        for filename, data in st.session_state.analyzed_files.items():
+            table_html += f"""
+                <tr>
+                    <td>{filename}</td>
+                    <td><span class="tone-highlight">{data['top1_name']}</span> <br> <span style="font-size:12px; color:#a4b0be;">({data['top1_conf']})</span></td>
+                    <td>{data['top2_name']} <br> <span style="font-size:12px; color:#a4b0be;">({data['top2_conf']})</span></td>
+                </tr>
+            """
+            
+        # Đóng thẻ bảng
+        table_html += """
+            </tbody>
+        </table>
+        """
+        
+        # Hiển thị bảng lên Web
+        st.markdown(table_html, unsafe_allow_html=True)
