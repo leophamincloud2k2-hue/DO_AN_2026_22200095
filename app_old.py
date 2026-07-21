@@ -163,7 +163,6 @@ st.markdown("""
     </div>
     <hr style="border: 0.5px solid #2d2d44; margin-bottom: 30px;">
 """, unsafe_allow_html=True)
-st.write("---")
 
 if model is None:
     st.error(f"❌ Không tìm thấy file model: {MODEL_PATH}")
