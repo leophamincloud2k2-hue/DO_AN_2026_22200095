@@ -197,37 +197,25 @@ else:
                         st.error(f"Lỗi khi đọc file {file.name}: {e}")
 
     # Nếu đã có dữ liệu trong bộ nhớ, tiến hành vẽ Bảng HTML
+    # Nếu đã có dữ liệu trong bộ nhớ, tiến hành vẽ Bảng HTML
     if st.session_state.analyzed_files:
         st.markdown("<br>", unsafe_allow_html=True) # Tạo khoảng trống
         
-        # Bắt đầu chuỗi HTML tạo bảng
-        table_html = """
-        <table class="styled-table">
-            <thead>
-                <tr>
-                    <th>File</th>
-                    <th>Top 1 Key</th>
-                    <th>Top 2 Key</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
+        # Bắt đầu chuỗi HTML tạo bảng (Ép phẳng hoàn toàn để không bị lỗi Markdown)
+        table_html = '<table class="styled-table">\n'
+        table_html += '<thead>\n<tr>\n<th>File</th>\n<th>Top 1 Key</th>\n<th>Top 2 Key</th>\n</tr>\n</thead>\n'
+        table_html += '<tbody>\n'
         
         # Duyệt qua các bài hát đã lưu và điền vào hàng
         for filename, data in st.session_state.analyzed_files.items():
-            table_html += f"""
-                <tr>
-                    <td>{filename}</td>
-                    <td><span class="tone-highlight">{data['top1_name']}</span> <br> <span style="font-size:12px; color:#a4b0be;">({data['top1_conf']})</span></td>
-                    <td>{data['top2_name']} <br> <span style="font-size:12px; color:#a4b0be;">({data['top2_conf']})</span></td>
-                </tr>
-            """
+            table_html += '<tr>\n'
+            table_html += f'<td>{filename}</td>\n'
+            table_html += f'<td><span class="tone-highlight">{data["top1_name"]}</span> <br> <span style="font-size:12px; color:#a4b0be;">({data["top1_conf"]})</span></td>\n'
+            table_html += f'<td>{data["top2_name"]} <br> <span style="font-size:12px; color:#a4b0be;">({data["top2_conf"]})</span></td>\n'
+            table_html += '</tr>\n'
             
         # Đóng thẻ bảng
-        table_html += """
-            </tbody>
-        </table>
-        """
+        table_html += '</tbody>\n</table>'
         
         # Hiển thị bảng lên Web
         st.markdown(table_html, unsafe_allow_html=True)
