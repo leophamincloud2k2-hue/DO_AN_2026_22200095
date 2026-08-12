@@ -131,7 +131,7 @@ class KeyCRNN_V2(nn.Module):
             nn.BatchNorm2d(64), nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=(1, 2)),
         )
-        self.rnn = nn.LSTM(input_size=64 * 6, hidden_size=128, num_layers=2, batch_first=True, bidirectional=True, dropout=0.3)
+        self.rnn = nn.LSTM(input_size=64 * 3, hidden_size=128, num_layers=2, batch_first=True, bidirectional=True, dropout=0.3)
         self.head = nn.Sequential(
             nn.Linear(256, 64), nn.ReLU(inplace=True),
             nn.Dropout(0.4), nn.Linear(64, N_CLASSES),
@@ -166,22 +166,16 @@ def load_model(model_name):
         req_bins = 13
         
         # Nhận diện thông minh dựa trên SHAPE của layer (Chống lỗi 100%)
-        if "CRNN" in model_name:
-            head_weight_key = "head.3.weight"
-            if head_weight_key in clean_state_dict:
-                # Nếu layer Linear cuối nhận vào 128 neurons -> Đó là bản Attention (V3)
-                if clean_state_dict[head_weight_key].shape[1] == 128:
-                    model = KeyCRNN_Attention()
-                    req_bins = 13
-                else:
-                    # Nếu nhận vào 64 neurons -> Đó là bản cũ (V2)
-                    model = KeyCRNN_V2()
-                    req_bins = 25
-            else:
-                model = KeyCRNN_Attention()
-                req_bins = 13
+    if "CRNN" in model_name:
+        has_attention = any("attention" in k for k in clean_state_dict.keys())
+        if has_attention:
+            model = KeyCRNN_Attention()
+            req_bins = 13
         else:
-            model = KeyCNN_13Bins()
+            model = KeyCRNN_V2()
+            req_bins = 13
+    else:
+        model = KeyCNN_13Bins()
             req_bins = 13
             
         # Nạp trọng số. Bọc Try-Except để web không bao giờ sập
