@@ -21,13 +21,14 @@ TONE_CLASSES = [
 ]
 N_CLASSES = len(TONE_CLASSES)
 
-# BẠN CÓ THỂ ĐỔI TÊN FILE .pth Ở ĐÂY CHO KHỚP VỚI THỰC TẾ
+# Định nghĩa 3 mô hình (Sửa tên file .pth cho khớp với file trên Github của bạn)
 MODELS_CONFIG = {
     "CRNN (Toàn bài)": "key_detector_crnn_fullbai_v2.pth",
     "CNN (30s Đầu)": "model_CNN_30fs.pth",
     "CNN (30s Cuối)": "model_CNN_30ls.pth"
 }
 
+# Khởi tạo Session State để lưu kết quả phân tích tránh load lại
 if 'predictions' not in st.session_state:
     st.session_state.predictions = {}
 
@@ -35,7 +36,6 @@ if 'predictions' not in st.session_state:
 # 2. ĐỊNH NGHĨA KIẾN TRÚC CÁC MẠNG NƠ-RON
 # ═══════════════════════════════════════════════════════════
 
-# ---- MẠNG CNN 13 BINS CỤC BỘ ----
 class KeyCNN_13Bins(nn.Module):
     def __init__(self):
         super().__init__()
@@ -45,17 +45,18 @@ class KeyCNN_13Bins(nn.Module):
             nn.Conv2d(32, 32, kernel_size=(3, 3), padding=1),
             nn.BatchNorm2d(32), nn.ELU(inplace=True),
             nn.MaxPool2d(kernel_size=(1, 2)),
-            
+
             nn.Conv2d(32, 64, kernel_size=(3, 3), padding=1),
             nn.BatchNorm2d(64), nn.ELU(inplace=True),
             nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
             nn.BatchNorm2d(64), nn.ELU(inplace=True),
             nn.MaxPool2d(kernel_size=(1, 2)), 
+
+            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(64), nn.ELU(inplace=True),
+            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(64), nn.ELU(inplace=True),
             
-            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
-            nn.BatchNorm2d(64), nn.ELU(inplace=True),
-            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
-            nn.BatchNorm2d(64), nn.ELU(inplace=True),
             nn.AdaptiveAvgPool2d((13, 1)),
         )
         self.head = nn.Sequential(
@@ -71,7 +72,6 @@ class KeyCNN_13Bins(nn.Module):
             x = x.permute(0, 1, 3, 2)
         return self.head(self.features(x))
 
-# ---- LỚP ATTENTION CHO CRNN ----
 class SelfAttention(nn.Module):
     def __init__(self, hidden_size):
         super().__init__()
@@ -85,7 +85,6 @@ class SelfAttention(nn.Module):
         attn_weights = torch.softmax(attn_weights, dim=1)
         return torch.sum(attn_weights * lstm_outputs, dim=1)
 
-# ---- MẠNG CRNN V3 (CÓ ATTENTION - 13 BINS) ----
 class KeyCRNN_Attention(nn.Module):
     def __init__(self):
         super().__init__()
@@ -119,7 +118,6 @@ class KeyCRNN_Attention(nn.Module):
         x = self.attention(x)
         return self.head(x)
 
-# ---- MẠNG CRNN V2 CŨ (KHÔNG ATTENTION - 25 BINS) ----
 class KeyCRNN_V2(nn.Module):
     def __init__(self):
         super().__init__()
@@ -131,6 +129,7 @@ class KeyCRNN_V2(nn.Module):
             nn.BatchNorm2d(64), nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=(1, 2)),
         )
+        # Đã sửa input_size = 64 * 3 để đồng bộ với 13 Bins (Fix lỗi [512, 384] vs [512, 192])
         self.rnn = nn.LSTM(input_size=64 * 3, hidden_size=128, num_layers=2, batch_first=True, bidirectional=True, dropout=0.3)
         self.head = nn.Sequential(
             nn.Linear(256, 64), nn.ReLU(inplace=True),
@@ -165,20 +164,15 @@ def load_model(model_name):
         
         req_bins = 13
         
-        # Nhận diện thông minh dựa trên SHAPE của layer (Chống lỗi 100%)
-    if "CRNN" in model_name:
-        has_attention = any("attention" in k for k in clean_state_dict.keys())
-        if has_attention:
-            model = KeyCRNN_Attention()
-            req_bins = 13
+        if "CRNN" in model_name:
+            has_attention = any("attention" in k for k in clean_state_dict.keys())
+            if has_attention:
+                model = KeyCRNN_Attention()
+            else:
+                model = KeyCRNN_V2()
         else:
-            model = KeyCRNN_V2()
-            req_bins = 13
-    else:
-        model = KeyCNN_13Bins()
-            req_bins = 13
+            model = KeyCNN_13Bins()
             
-        # Nạp trọng số. Bọc Try-Except để web không bao giờ sập
         model.load_state_dict(clean_state_dict, strict=False)
         model.eval()
         return model, model_path, req_bins, "Success"
@@ -187,7 +181,7 @@ def load_model(model_name):
         return None, model_path, 13, f"Lỗi nạp trọng số: {e}"
 
 # ═══════════════════════════════════════════════════════════
-# 4. HÀM TRÍCH XUẤT ĐẶC TRƯNG DSP
+# 4. HÀM TRÍCH XUẤT ĐẶC TRƯNG DSP ĐỘNG
 # ═══════════════════════════════════════════════════════════
 def process_audio(file_bytes, model_name, req_bins):
     duration = 30 if "30s Đầu" in model_name else 60
@@ -214,6 +208,7 @@ def process_audio(file_bytes, model_name, req_bins):
         if mx > mn: 
             feat[i] = (feat[i] - mn) / (mx - mn)
     feat = feat.T 
+    
     return feat, chroma_full
 
 # ═══════════════════════════════════════════════════════════
@@ -221,12 +216,11 @@ def process_audio(file_bytes, model_name, req_bins):
 # ═══════════════════════════════════════════════════════════
 st.title("🎵 Hệ Thống Phân Tích & Đánh Giá Tone Nhạc Hàng Loạt")
 
-# --- SIDEBAR ---
+# --- SIDEBAR: CHỌN MÔ HÌNH ---
 st.sidebar.header("⚙️ Cấu hình Hệ thống")
 selected_model_name = st.sidebar.selectbox("Lựa chọn Mô hình dự đoán:", list(MODELS_CONFIG.keys()))
 
-# Chức năng xóa cache
-if st.sidebar.button("🧹 Xóa Cache & Tải lại"):
+if st.sidebar.button("🧹 Xóa Cache & Tải lại Mô hình"):
     st.cache_resource.clear()
     st.session_state.predictions = {}
     st.rerun()
@@ -234,9 +228,9 @@ if st.sidebar.button("🧹 Xóa Cache & Tải lại"):
 model, current_model_path, req_bins, load_status = load_model(selected_model_name)
 
 if model is None:
-    st.sidebar.error(f"❌ CẢNH BÁO LỖI:")
-    st.sidebar.error(load_status)
-    st.sidebar.warning("Ứng dụng đang chạy ở chế độ Mô phỏng (Mock Data). Vui lòng kiểm tra lại file .pth của bạn!")
+    st.sidebar.error(f"❌ KHÔNG THỂ NẠP MÔ HÌNH: `{current_model_path}`")
+    st.sidebar.warning(f"**Chi tiết lỗi:**\n{load_status}")
+    st.sidebar.info("Ứng dụng sẽ sinh ra kết quả mô phỏng (Mock) để bạn test giao diện.")
 else:
     st.sidebar.success(f"✅ Đã nạp mô hình: `{selected_model_name}`")
     st.sidebar.info(f"🧠 Cấu trúc trích xuất: `{req_bins} Bins`")
@@ -250,7 +244,7 @@ st.sidebar.markdown("""
 4. Bấm "Tổng hợp Báo cáo".
 """)
 
-# --- MAIN AREA ---
+# --- MAIN AREA: UPLOAD & PROCESS ---
 uploaded_files = st.file_uploader("📂 Tải lên danh sách bài hát (WAV, MP3)", type=["wav", "mp3"], accept_multiple_files=True)
 
 if uploaded_files:
@@ -261,6 +255,7 @@ if uploaded_files:
         for i, file in enumerate(uploaded_files):
             file_name = file.name
             status_text.text(f"Đang phân tích: {file_name} ({i+1}/{len(uploaded_files)})...")
+            
             cache_key = f"{file_name}_{selected_model_name}"
             
             if cache_key not in st.session_state.predictions:
