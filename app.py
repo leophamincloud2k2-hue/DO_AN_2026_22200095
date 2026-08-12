@@ -6,21 +6,13 @@ import librosa
 import librosa.display
 import matplotlib.pyplot as plt
 import os
+import pandas as pd
 
 # ═══════════════════════════════════════════════════════════
-# 1. CẤU HÌNH GIAO DIỆN WEB
+# 1. CẤU HÌNH GIAO DIỆN WEB & HẰNG SỐ
 # ═══════════════════════════════════════════════════════════
-st.set_page_config(page_title="AI Key Detector", page_icon="🎵", layout="centered")
+st.set_page_config(page_title="AI Key Detector & Evaluator", page_icon="🎵", layout="wide")
 
-st.title("🎵 AI Music Key Detector")
-st.markdown("""
-**Chào mừng đến với hệ thống nhận diện Tone nhạc bằng Trí tuệ Nhân tạo!**
-Hệ thống sử dụng mạng nơ-ron tích chập hồi quy (CRNN) kết hợp phân tích dải tần số kép (Full-Chroma & Bass-Chroma).
-""")
-
-# ═══════════════════════════════════════════════════════════
-# 2. ĐỊNH NGHĨA MẠNG CRNN & NHÃN
-# ═══════════════════════════════════════════════════════════
 TONE_CLASSES = [
     "C_Major",  "Db_Major", "D_Major",  "Eb_Major", "E_Major",  "F_Major",
     "F#_Major", "G_Major",  "Ab_Major", "A_Major",  "Bb_Major", "B_Major",
@@ -28,8 +20,21 @@ TONE_CLASSES = [
     "F#_Minor", "G_Minor",  "G#_Minor", "A_Minor",  "Bb_Minor", "B_Minor",
 ]
 N_CLASSES = len(TONE_CLASSES)
-MODEL_PATH = "key_detector_crnn_fullbai_v2.pth"  # Đảm bảo file này nằm cùng thư mục
 
+# Định nghĩa 3 mô hình
+MODELS_CONFIG = {
+    "CRNN (Toàn bài)": "key_detector_crnn_fullbai_v2.pth",
+    "CNN (30s Đầu)": "key_detector_cnn_first30s.pth",
+    "CNN (30s Cuối)": "key_detector_cnn_last30s.pth"
+}
+
+# Khởi tạo Session State để lưu kết quả phân tích tránh load lại
+if 'predictions' not in st.session_state:
+    st.session_state.predictions = {}
+
+# ═══════════════════════════════════════════════════════════
+# 2. ĐỊNH NGHĨA MẠNG CRNN
+# ═══════════════════════════════════════════════════════════
 class KeyCRNN(nn.Module):
     def __init__(self):
         super().__init__()
@@ -62,29 +67,29 @@ class KeyCRNN(nn.Module):
         x = x.mean(dim=1)                     
         return self.head(x)
 
-# Cache model để không phải load lại mỗi khi ấn nút trên Web
 @st.cache_resource
-def load_model():
-    if not os.path.exists(MODEL_PATH):
-        return None
+def load_model(model_name):
+    model_path = MODELS_CONFIG[model_name]
     model = KeyCRNN()
-    ckpt = torch.load(MODEL_PATH, map_location="cpu")
-    model.load_state_dict(ckpt["model_state"])
+    
+    if not os.path.exists(model_path):
+        return None, model_path
+        
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
+    if "model_state" in ckpt:
+        model.load_state_dict(ckpt["model_state"])
+    else:
+        model.load_state_dict(ckpt) # Fallback nếu lưu trực tiếp state_dict
     model.eval()
-    return model
-
-model = load_model()
+    return model, model_path
 
 # ═══════════════════════════════════════════════════════════
-# 3. HÀM TRÍCH XUẤT ĐẶC TRƯNG DSP TỪ FILE UPLOAD
+# 3. HÀM TRÍCH XUẤT ĐẶC TRƯNG DSP
 # ═══════════════════════════════════════════════════════════
 def process_audio(file_bytes):
-    # Load audio từ bộ nhớ tạm (upload) thay vì từ ổ cứng
-    y, sr = librosa.load(file_bytes, sr=22050, mono=True, duration=60) # Cắt 60s cho Web chạy nhanh
-    
+    y, sr = librosa.load(file_bytes, sr=22050, mono=True, duration=60)
     y_harm = librosa.effects.harmonic(y, margin=4)
     
-    # DSP: Trích xuất 25 Features
     chroma_full = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=512, bins_per_octave=36)
     chroma_bass = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=512, fmin=librosa.note_to_hz('C1'), n_octaves=3, bins_per_octave=36)
     mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, hop_length=512)
@@ -98,56 +103,164 @@ def process_audio(file_bytes):
             feat[i] = (feat[i] - mn) / (mx - mn)
     feat = feat.T 
     
-    return feat, chroma_full # Trả về chroma_full để vẽ đồ thị
+    return feat, chroma_full
 
 # ═══════════════════════════════════════════════════════════
 # 4. GIAO DIỆN TƯƠNG TÁC
 # ═══════════════════════════════════════════════════════════
-if model is None:
-    st.error(f"❌ Không tìm thấy file model: {MODEL_PATH}. Vui lòng copy file .pth vào cùng thư mục với app.py!")
-else:
-    uploaded_file = st.file_uploader("📂 Tải lên bài hát (Định dạng: WAV, MP3)", type=["wav", "mp3"])
+st.title("🎵 Hệ Thống Phân Tích & Đánh Giá Tone Nhạc Hàng Loạt")
 
-    if uploaded_file is not None:
-        st.audio(uploaded_file, format='audio/wav')
+# --- SIDEBAR: CHỌN MÔ HÌNH ---
+st.sidebar.header("⚙️ Cấu hình Hệ thống")
+selected_model_name = st.sidebar.selectbox("Lựa chọn Mô hình dự đoán:", list(MODELS_CONFIG.keys()))
+
+model, current_model_path = load_model(selected_model_name)
+
+if model is None:
+    st.sidebar.error(f"❌ Không tìm thấy file: `{current_model_path}`")
+    st.sidebar.warning("Vui lòng tải file trọng số (.pth) vào thư mục gốc. Ứng dụng sẽ sinh ra kết quả mô phỏng (Mock) để bạn test giao diện.")
+else:
+    st.sidebar.success(f"✅ Đã nạp mô hình: `{selected_model_name}`")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("""
+**Hướng dẫn sử dụng:**
+1. Upload nhiều bài hát cùng lúc.
+2. Bấm "Phân tích tất cả".
+3. Nghe thử và đánh giá Đúng/Sai.
+4. Bấm "Tổng hợp Báo cáo".
+""")
+
+# --- MAIN AREA: UPLOAD & PROCESS ---
+uploaded_files = st.file_uploader("📂 Tải lên danh sách bài hát (WAV, MP3)", type=["wav", "mp3"], accept_multiple_files=True)
+
+if uploaded_files:
+    if st.button("🚀 Bắt đầu Phân tích tất cả", type="primary"):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         
-        if st.button("🚀 Bắt đầu Phân tích Tone", use_container_width=True):
-            with st.spinner("⏳ Đang xử lý DSP và chạy AI phân tích..."):
+        for i, file in enumerate(uploaded_files):
+            file_name = file.name
+            status_text.text(f"Đang phân tích: {file_name} ({i+1}/{len(uploaded_files)})...")
+            
+            # Chỉ phân tích nếu chưa có trong session state
+            if file_name not in st.session_state.predictions:
                 try:
-                    # Chạy DSP
-                    feat, chroma_plot = process_audio(uploaded_file)
+                    feat, chroma_plot = process_audio(file)
                     
-                    # Chạy Model Inference
-                    x = torch.tensor(feat).unsqueeze(0).float()   
-                    with torch.no_grad():
-                        logits = model(x)
-                        probs = torch.softmax(logits, dim=1)[0]
-                    
-                    # Lấy kết quả Top 1 và Top 2
+                    if model is not None:
+                        x = torch.tensor(feat).unsqueeze(0).float()   
+                        with torch.no_grad():
+                            probs = torch.softmax(model(x), dim=1)[0]
+                    else:
+                        # MOCK DATA nếu không có file model để test giao diện
+                        probs = torch.rand(N_CLASSES)
+                        probs = torch.softmax(probs, dim=0)
+
                     top2_prob, top2_idx = torch.topk(probs, 2)
                     
-                    pred_tone_1 = TONE_CLASSES[top2_idx[0].item()]
-                    conf_1 = top2_prob[0].item() * 100
-                    
-                    pred_tone_2 = TONE_CLASSES[top2_idx[1].item()]
-                    conf_2 = top2_prob[1].item() * 100
-
-                    # Hiển thị Kết quả
-                    st.success("✅ Phân tích hoàn tất!")
-                    st.markdown("### 🏆 Kết quả Nhận diện:")
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.info(f"**Top 1:** {pred_tone_1}\n\n**Độ tin cậy:** {conf_1:.1f}%")
-                    with col2:
-                        st.warning(f"**Top 2 (Dự phòng):** {pred_tone_2}\n\n**Độ tin cậy:** {conf_2:.1f}%")
-
-                    # Vẽ đồ thị biểu diễn phổ âm nhạc
-                    st.markdown("### 📊 Bản đồ Đặc trưng Tần số (Chromagram)")
-                    fig, ax = plt.subplots(figsize=(10, 4))
-                    img = librosa.display.specshow(chroma_plot, y_axis='chroma', x_axis='time', ax=ax, cmap='coolwarm')
-                    fig.colorbar(img, ax=ax)
-                    st.pyplot(fig)
-
+                    st.session_state.predictions[file_name] = {
+                        "top1_tone": TONE_CLASSES[top2_idx[0].item()],
+                        "top1_conf": top2_prob[0].item() * 100,
+                        "top2_tone": TONE_CLASSES[top2_idx[1].item()],
+                        "top2_conf": top2_prob[1].item() * 100,
+                        "status": "success",
+                        "chroma_plot": chroma_plot # Có thể lưu để vẽ lại nếu cần
+                    }
                 except Exception as e:
-                    st.error(f"❌ Xảy ra lỗi trong quá trình phân tích: {e}")
+                    st.session_state.predictions[file_name] = {"status": "error", "message": str(e)}
+            
+            progress_bar.progress((i + 1) / len(uploaded_files))
+            
+        status_text.success("✅ Phân tích hoàn tất!")
+
+# --- FEEDBACK AREA ---
+if st.session_state.predictions and uploaded_files:
+    st.markdown("### 📝 Đánh Giá Kết Quả")
+    
+    # Tạo Form để thu thập kết quả
+    with st.form("evaluation_form"):
+        eval_data = {} # Biến lưu tạm dữ liệu đánh giá
+        
+        for file in uploaded_files:
+            file_name = file.name
+            if file_name in st.session_state.predictions:
+                pred_info = st.session_state.predictions[file_name]
+                
+                if pred_info["status"] == "error":
+                    st.error(f"Lỗi phân tích bài {file_name}: {pred_info['message']}")
+                    continue
+                
+                st.markdown(f"**Bài hát:** `{file_name}`")
+                
+                col_audio, col_pred, col_eval = st.columns([1, 1, 1.5])
+                
+                with col_audio:
+                    st.audio(file, format='audio/wav')
+                
+                with col_pred:
+                    st.info(f"**Dự đoán:** {pred_info['top1_tone']} ({pred_info['top1_conf']:.1f}%)\n\n"
+                            f"*(Top 2: {pred_info['top2_tone']} - {pred_info['top2_conf']:.1f}%)*")
+                
+                with col_eval:
+                    # Nút chọn Đúng sai
+                    radio_val = st.radio("Đánh giá mô hình:", ["Đúng", "Sai", "Chưa kiểm tra"], index=2, horizontal=True, key=f"radio_{file_name}")
+                    
+                    # Nếu chọn Sai, hiển thị box chọn Key chuẩn
+                    actual_key = pred_info['top1_tone'] # Mặc định là key dự đoán
+                    if radio_val == "Sai":
+                        actual_key = st.selectbox("Chọn Tone chuẩn xác:", TONE_CLASSES, key=f"correct_{file_name}")
+                    
+                    eval_data[file_name] = {
+                        "Dự đoán": pred_info['top1_tone'],
+                        "Đánh giá": radio_val,
+                        "Thực tế": actual_key if radio_val == "Sai" else pred_info['top1_tone']
+                    }
+                st.divider()
+        
+        submitted = st.form_submit_button("📊 Tính toán và Tổng hợp Báo cáo", type="primary")
+
+# --- REPORT AREA ---
+if 'submitted' in locals() and submitted:
+    st.markdown("### 📈 Bảng Thống Kê Tổng Hợp")
+    
+    # Lọc ra các bài hát đã được đánh giá (Bỏ qua "Chưa kiểm tra")
+    evaluated_records = []
+    correct_count = 0
+    
+    for file_name, data in eval_data.items():
+        if data["Đánh giá"] != "Chưa kiểm tra":
+            evaluated_records.append({
+                "Tên bài hát": file_name,
+                "Mô hình dự đoán": data["Dự đoán"],
+                "Tone thực tế": data["Thực tế"],
+                "Kết quả": "✅ Đúng" if data["Đánh giá"] == "Đúng" else "❌ Sai"
+            })
+            if data["Đánh giá"] == "Đúng":
+                correct_count += 1
+                
+    total_evaluated = len(evaluated_records)
+    
+    if total_evaluated > 0:
+        accuracy = (correct_count / total_evaluated) * 100
+        
+        # Hiển thị số liệu tổng quan
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Tổng số bài đã đánh giá", total_evaluated)
+        col2.metric("Số bài dự đoán Đúng", correct_count)
+        col3.metric("Độ chính xác (Accuracy)", f"{accuracy:.2f}%")
+        
+        # Hiển thị Bảng DataFrame
+        df_report = pd.DataFrame(evaluated_records)
+        st.dataframe(df_report, use_container_width=True)
+        
+        # Nút tải xuống CSV
+        csv = df_report.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Tải Báo cáo (CSV)",
+            data=csv,
+            file_name='Music_Key_Detection_Report.csv',
+            mime='text/csv',
+        )
+    else:
+        st.warning("Vui lòng đánh giá (Đúng/Sai) ít nhất 1 bài hát để xem báo cáo thống kê.")
