@@ -21,14 +21,13 @@ TONE_CLASSES = [
 ]
 N_CLASSES = len(TONE_CLASSES)
 
-# Định nghĩa 3 mô hình theo đúng cấu hình của bạn
+# BẠN CÓ THỂ ĐỔI TÊN FILE .pth Ở ĐÂY CHO KHỚP VỚI THỰC TẾ
 MODELS_CONFIG = {
     "CRNN (Toàn bài)": "key_detector_crnn_fullbai_v2.pth",
     "CNN (30s Đầu)": "model_CNN_30fs.pth",
     "CNN (30s Cuối)": "model_CNN_30ls.pth"
 }
 
-# Khởi tạo Session State để lưu kết quả phân tích tránh load lại
 if 'predictions' not in st.session_state:
     st.session_state.predictions = {}
 
@@ -150,46 +149,53 @@ class KeyCRNN_V2(nn.Module):
         return self.head(x)
 
 # ═══════════════════════════════════════════════════════════
-# 3. TRÌNH NẠP MODEL THÔNG MINH (AUTO-DETECT ARCHITECTURE)
+# 3. TRÌNH NẠP MODEL SIÊU AN TOÀN (ANTI-CRASH)
 # ═══════════════════════════════════════════════════════════
 @st.cache_resource
 def load_model(model_name):
     model_path = MODELS_CONFIG[model_name]
     
     if not os.path.exists(model_path):
-        return None, model_path, 13
+        return None, model_path, 13, "Lỗi: Không tìm thấy file"
         
-    ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
-    state_dict = ckpt.get("model_state", ckpt)
-    
-    # Tẩy rửa tiền tố 'module.' do train bằng DataParallel (nhiều GPU)
-    clean_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-    
-    req_bins = 13
-    
-    # Auto-detect kiến trúc thông minh
-    if "CRNN" in model_name:
-        has_attention = any("attention" in k for k in clean_state_dict.keys())
-        if has_attention:
-            model = KeyCRNN_Attention()
-            req_bins = 13
-        else:
-            model = KeyCRNN_V2()
-            req_bins = 25
-    else:
-        model = KeyCNN_13Bins()
+    try:
+        ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
+        state_dict = ckpt.get("model_state", ckpt)
+        clean_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        
         req_bins = 13
         
-    # Nạp trọng số an toàn
-    model.load_state_dict(clean_state_dict, strict=False)
-    model.eval()
-    return model, model_path, req_bins
+        # Nhận diện thông minh dựa trên SHAPE của layer (Chống lỗi 100%)
+        if "CRNN" in model_name:
+            head_weight_key = "head.3.weight"
+            if head_weight_key in clean_state_dict:
+                # Nếu layer Linear cuối nhận vào 128 neurons -> Đó là bản Attention (V3)
+                if clean_state_dict[head_weight_key].shape[1] == 128:
+                    model = KeyCRNN_Attention()
+                    req_bins = 13
+                else:
+                    # Nếu nhận vào 64 neurons -> Đó là bản cũ (V2)
+                    model = KeyCRNN_V2()
+                    req_bins = 25
+            else:
+                model = KeyCRNN_Attention()
+                req_bins = 13
+        else:
+            model = KeyCNN_13Bins()
+            req_bins = 13
+            
+        # Nạp trọng số. Bọc Try-Except để web không bao giờ sập
+        model.load_state_dict(clean_state_dict, strict=False)
+        model.eval()
+        return model, model_path, req_bins, "Success"
+        
+    except Exception as e:
+        return None, model_path, 13, f"Lỗi nạp trọng số: {e}"
 
 # ═══════════════════════════════════════════════════════════
-# 4. HÀM TRÍCH XUẤT ĐẶC TRƯNG DSP ĐỘNG
+# 4. HÀM TRÍCH XUẤT ĐẶC TRƯNG DSP
 # ═══════════════════════════════════════════════════════════
 def process_audio(file_bytes, model_name, req_bins):
-    # Cắt gọn thời gian để Web xử lý nhanh
     duration = 30 if "30s Đầu" in model_name else 60
     
     y, sr = librosa.load(file_bytes, sr=22050, mono=True, duration=duration)
@@ -204,20 +210,16 @@ def process_audio(file_bytes, model_name, req_bins):
     mel_mean = librosa.power_to_db(mel, ref=np.max).mean(axis=0, keepdims=True)
     
     if req_bins == 25:
-        # Cấu hình cũ 25 Bins (Dành cho bản CRNN V2 cũ)
         chroma_bass = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=512, fmin=librosa.note_to_hz('C1'), n_octaves=3, bins_per_octave=36)
         feat = np.concatenate([chroma_full, chroma_bass, mel_mean], axis=0).astype(np.float32)
     else:
-        # Cấu hình mới 13 Bins (Dành cho CNN và CRNN có Attention)
         feat = np.concatenate([chroma_full, mel_mean], axis=0).astype(np.float32)
         
-    # Chuẩn hóa Min-Max
     for i in range(feat.shape[0]):
         mn, mx = feat[i].min(), feat[i].max()
         if mx > mn: 
             feat[i] = (feat[i] - mn) / (mx - mn)
     feat = feat.T 
-    
     return feat, chroma_full
 
 # ═══════════════════════════════════════════════════════════
@@ -225,15 +227,22 @@ def process_audio(file_bytes, model_name, req_bins):
 # ═══════════════════════════════════════════════════════════
 st.title("🎵 Hệ Thống Phân Tích & Đánh Giá Tone Nhạc Hàng Loạt")
 
-# --- SIDEBAR: CHỌN MÔ HÌNH ---
+# --- SIDEBAR ---
 st.sidebar.header("⚙️ Cấu hình Hệ thống")
 selected_model_name = st.sidebar.selectbox("Lựa chọn Mô hình dự đoán:", list(MODELS_CONFIG.keys()))
 
-model, current_model_path, req_bins = load_model(selected_model_name)
+# Chức năng xóa cache
+if st.sidebar.button("🧹 Xóa Cache & Tải lại"):
+    st.cache_resource.clear()
+    st.session_state.predictions = {}
+    st.rerun()
+
+model, current_model_path, req_bins, load_status = load_model(selected_model_name)
 
 if model is None:
-    st.sidebar.error(f"❌ Không tìm thấy file: `{current_model_path}`")
-    st.sidebar.warning("Vui lòng tải file trọng số (.pth) vào thư mục gốc trên Github. Ứng dụng sẽ sinh ra kết quả mô phỏng (Mock) để bạn test giao diện.")
+    st.sidebar.error(f"❌ CẢNH BÁO LỖI:")
+    st.sidebar.error(load_status)
+    st.sidebar.warning("Ứng dụng đang chạy ở chế độ Mô phỏng (Mock Data). Vui lòng kiểm tra lại file .pth của bạn!")
 else:
     st.sidebar.success(f"✅ Đã nạp mô hình: `{selected_model_name}`")
     st.sidebar.info(f"🧠 Cấu trúc trích xuất: `{req_bins} Bins`")
@@ -247,7 +256,7 @@ st.sidebar.markdown("""
 4. Bấm "Tổng hợp Báo cáo".
 """)
 
-# --- MAIN AREA: UPLOAD & PROCESS ---
+# --- MAIN AREA ---
 uploaded_files = st.file_uploader("📂 Tải lên danh sách bài hát (WAV, MP3)", type=["wav", "mp3"], accept_multiple_files=True)
 
 if uploaded_files:
@@ -258,7 +267,6 @@ if uploaded_files:
         for i, file in enumerate(uploaded_files):
             file_name = file.name
             status_text.text(f"Đang phân tích: {file_name} ({i+1}/{len(uploaded_files)})...")
-            
             cache_key = f"{file_name}_{selected_model_name}"
             
             if cache_key not in st.session_state.predictions:
@@ -270,7 +278,6 @@ if uploaded_files:
                         with torch.no_grad():
                             probs = torch.softmax(model(x), dim=1)[0]
                     else:
-                        # Sinh kết quả giả lập nếu không có file model
                         probs = torch.rand(N_CLASSES)
                         probs = torch.softmax(probs, dim=0)
 
