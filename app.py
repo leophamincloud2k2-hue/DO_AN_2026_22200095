@@ -21,11 +21,11 @@ TONE_CLASSES = [
 ]
 N_CLASSES = len(TONE_CLASSES)
 
-# Định nghĩa 3 mô hình
+# Định nghĩa 3 mô hình theo đúng cấu hình của bạn
 MODELS_CONFIG = {
     "CRNN (Toàn bài)": "key_detector_crnn_fullbai_v2.pth",
-    "CNN (30s Đầu)": "key_detector_cnn_first30s.pth",
-    "CNN (30s Cuối)": "key_detector_cnn_last30s.pth"
+    "CNN (30s Đầu)": "model_CNN_30fs.pth",
+    "CNN (30s Cuối)": "model_CNN_30ls.pth"
 }
 
 # Khởi tạo Session State để lưu kết quả phân tích tránh load lại
@@ -33,9 +33,95 @@ if 'predictions' not in st.session_state:
     st.session_state.predictions = {}
 
 # ═══════════════════════════════════════════════════════════
-# 2. ĐỊNH NGHĨA MẠNG CRNN
+# 2. ĐỊNH NGHĨA KIẾN TRÚC CÁC MẠNG NƠ-RON
 # ═══════════════════════════════════════════════════════════
-class KeyCRNN(nn.Module):
+
+# ---- MẠNG CNN 13 BINS CỤC BỘ ----
+class KeyCNN_13Bins(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(32), nn.ELU(inplace=True),
+            nn.Conv2d(32, 32, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(32), nn.ELU(inplace=True),
+            nn.MaxPool2d(kernel_size=(1, 2)),
+            
+            nn.Conv2d(32, 64, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(64), nn.ELU(inplace=True),
+            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(64), nn.ELU(inplace=True),
+            nn.MaxPool2d(kernel_size=(1, 2)), 
+            
+            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(64), nn.ELU(inplace=True),
+            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(64), nn.ELU(inplace=True),
+            nn.AdaptiveAvgPool2d((13, 1)),
+        )
+        self.head = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(0.5),
+            nn.Linear(832, N_CLASSES) 
+        )
+
+    def forward(self, x):
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+        if x.shape[2] > x.shape[3]:
+            x = x.permute(0, 1, 3, 2)
+        return self.head(self.features(x))
+
+# ---- LỚP ATTENTION CHO CRNN ----
+class SelfAttention(nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.Tanh(),
+            nn.Linear(hidden_size // 2, 1)
+        )
+    def forward(self, lstm_outputs):
+        attn_weights = self.attention(lstm_outputs)
+        attn_weights = torch.softmax(attn_weights, dim=1)
+        return torch.sum(attn_weights * lstm_outputs, dim=1)
+
+# ---- MẠNG CRNN V3 (CÓ ATTENTION - 13 BINS) ----
+class KeyCRNN_Attention(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=(3, 3), padding=(1, 1)),
+            nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(1, 2)),
+            nn.Conv2d(32, 64, kernel_size=(3, 3), padding=(1, 1)),
+            nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(1, 2)),
+            nn.Conv2d(64, 128, kernel_size=(3, 3), padding=(1, 1)),
+            nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(1, 2)),
+        )
+        self.rnn = nn.LSTM(input_size=1664, hidden_size=128, num_layers=2, batch_first=True, bidirectional=True, dropout=0.3)
+        self.attention = SelfAttention(hidden_size=256)
+        self.head = nn.Sequential(
+            nn.Linear(256, 128), nn.ReLU(inplace=True),
+            nn.Dropout(0.5), nn.Linear(128, N_CLASSES),
+        )
+
+    def forward(self, x):
+        B, T, F = x.shape
+        x = x.unsqueeze(1)                    
+        x = x.permute(0, 1, 3, 2)
+        x = self.cnn(x)                       
+        _, C, F_out, T_out = x.shape
+        x = x.permute(0, 3, 1, 2)            
+        x = x.reshape(B, T_out, C * F_out)          
+        x, _ = self.rnn(x)                    
+        x = self.attention(x)
+        return self.head(x)
+
+# ---- MẠNG CRNN V2 CŨ (KHÔNG ATTENTION - 25 BINS) ----
+class KeyCRNN_V2(nn.Module):
     def __init__(self):
         super().__init__()
         self.cnn = nn.Sequential(
@@ -46,11 +132,7 @@ class KeyCRNN(nn.Module):
             nn.BatchNorm2d(64), nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=(1, 2)),
         )
-        self.rnn = nn.LSTM(
-            input_size=64 * 6, # Hỗ trợ 25 features 
-            hidden_size=128, num_layers=2, batch_first=True,
-            bidirectional=True, dropout=0.3,
-        )
+        self.rnn = nn.LSTM(input_size=64 * 6, hidden_size=128, num_layers=2, batch_first=True, bidirectional=True, dropout=0.3)
         self.head = nn.Sequential(
             nn.Linear(256, 64), nn.ReLU(inplace=True),
             nn.Dropout(0.4), nn.Linear(64, N_CLASSES),
@@ -67,36 +149,69 @@ class KeyCRNN(nn.Module):
         x = x.mean(dim=1)                     
         return self.head(x)
 
+# ═══════════════════════════════════════════════════════════
+# 3. TRÌNH NẠP MODEL THÔNG MINH (AUTO-DETECT ARCHITECTURE)
+# ═══════════════════════════════════════════════════════════
 @st.cache_resource
 def load_model(model_name):
     model_path = MODELS_CONFIG[model_name]
-    model = KeyCRNN()
     
     if not os.path.exists(model_path):
-        return None, model_path
+        return None, model_path, 13
         
     ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
-    if "model_state" in ckpt:
-        model.load_state_dict(ckpt["model_state"])
+    state_dict = ckpt.get("model_state", ckpt)
+    
+    # Tẩy rửa tiền tố 'module.' do train bằng DataParallel (nhiều GPU)
+    clean_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    
+    req_bins = 13
+    
+    # Auto-detect kiến trúc thông minh
+    if "CRNN" in model_name:
+        has_attention = any("attention" in k for k in clean_state_dict.keys())
+        if has_attention:
+            model = KeyCRNN_Attention()
+            req_bins = 13
+        else:
+            model = KeyCRNN_V2()
+            req_bins = 25
     else:
-        model.load_state_dict(ckpt) # Fallback nếu lưu trực tiếp state_dict
+        model = KeyCNN_13Bins()
+        req_bins = 13
+        
+    # Nạp trọng số an toàn
+    model.load_state_dict(clean_state_dict, strict=False)
     model.eval()
-    return model, model_path
+    return model, model_path, req_bins
 
 # ═══════════════════════════════════════════════════════════
-# 3. HÀM TRÍCH XUẤT ĐẶC TRƯNG DSP
+# 4. HÀM TRÍCH XUẤT ĐẶC TRƯNG DSP ĐỘNG
 # ═══════════════════════════════════════════════════════════
-def process_audio(file_bytes):
-    y, sr = librosa.load(file_bytes, sr=22050, mono=True, duration=60)
+def process_audio(file_bytes, model_name, req_bins):
+    # Cắt gọn thời gian để Web xử lý nhanh
+    duration = 30 if "30s Đầu" in model_name else 60
+    
+    y, sr = librosa.load(file_bytes, sr=22050, mono=True, duration=duration)
+    
+    if "30s Cuối" in model_name and len(y) > 30 * sr:
+        y = y[-(30 * sr):]
+
     y_harm = librosa.effects.harmonic(y, margin=4)
     
     chroma_full = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=512, bins_per_octave=36)
-    chroma_bass = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=512, fmin=librosa.note_to_hz('C1'), n_octaves=3, bins_per_octave=36)
     mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, hop_length=512)
     mel_mean = librosa.power_to_db(mel, ref=np.max).mean(axis=0, keepdims=True)
     
-    feat = np.concatenate([chroma_full, chroma_bass, mel_mean], axis=0).astype(np.float32)
-    
+    if req_bins == 25:
+        # Cấu hình cũ 25 Bins (Dành cho bản CRNN V2 cũ)
+        chroma_bass = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=512, fmin=librosa.note_to_hz('C1'), n_octaves=3, bins_per_octave=36)
+        feat = np.concatenate([chroma_full, chroma_bass, mel_mean], axis=0).astype(np.float32)
+    else:
+        # Cấu hình mới 13 Bins (Dành cho CNN và CRNN có Attention)
+        feat = np.concatenate([chroma_full, mel_mean], axis=0).astype(np.float32)
+        
+    # Chuẩn hóa Min-Max
     for i in range(feat.shape[0]):
         mn, mx = feat[i].min(), feat[i].max()
         if mx > mn: 
@@ -106,7 +221,7 @@ def process_audio(file_bytes):
     return feat, chroma_full
 
 # ═══════════════════════════════════════════════════════════
-# 4. GIAO DIỆN TƯƠNG TÁC
+# 5. GIAO DIỆN TƯƠNG TÁC
 # ═══════════════════════════════════════════════════════════
 st.title("🎵 Hệ Thống Phân Tích & Đánh Giá Tone Nhạc Hàng Loạt")
 
@@ -114,13 +229,14 @@ st.title("🎵 Hệ Thống Phân Tích & Đánh Giá Tone Nhạc Hàng Loạt")
 st.sidebar.header("⚙️ Cấu hình Hệ thống")
 selected_model_name = st.sidebar.selectbox("Lựa chọn Mô hình dự đoán:", list(MODELS_CONFIG.keys()))
 
-model, current_model_path = load_model(selected_model_name)
+model, current_model_path, req_bins = load_model(selected_model_name)
 
 if model is None:
     st.sidebar.error(f"❌ Không tìm thấy file: `{current_model_path}`")
-    st.sidebar.warning("Vui lòng tải file trọng số (.pth) vào thư mục gốc. Ứng dụng sẽ sinh ra kết quả mô phỏng (Mock) để bạn test giao diện.")
+    st.sidebar.warning("Vui lòng tải file trọng số (.pth) vào thư mục gốc trên Github. Ứng dụng sẽ sinh ra kết quả mô phỏng (Mock) để bạn test giao diện.")
 else:
     st.sidebar.success(f"✅ Đã nạp mô hình: `{selected_model_name}`")
+    st.sidebar.info(f"🧠 Cấu trúc trích xuất: `{req_bins} Bins`")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
@@ -143,32 +259,33 @@ if uploaded_files:
             file_name = file.name
             status_text.text(f"Đang phân tích: {file_name} ({i+1}/{len(uploaded_files)})...")
             
-            # Chỉ phân tích nếu chưa có trong session state
-            if file_name not in st.session_state.predictions:
+            cache_key = f"{file_name}_{selected_model_name}"
+            
+            if cache_key not in st.session_state.predictions:
                 try:
-                    feat, chroma_plot = process_audio(file)
+                    feat, chroma_plot = process_audio(file, selected_model_name, req_bins)
                     
                     if model is not None:
                         x = torch.tensor(feat).unsqueeze(0).float()   
                         with torch.no_grad():
                             probs = torch.softmax(model(x), dim=1)[0]
                     else:
-                        # MOCK DATA nếu không có file model để test giao diện
+                        # Sinh kết quả giả lập nếu không có file model
                         probs = torch.rand(N_CLASSES)
                         probs = torch.softmax(probs, dim=0)
 
                     top2_prob, top2_idx = torch.topk(probs, 2)
                     
-                    st.session_state.predictions[file_name] = {
+                    st.session_state.predictions[cache_key] = {
                         "top1_tone": TONE_CLASSES[top2_idx[0].item()],
                         "top1_conf": top2_prob[0].item() * 100,
                         "top2_tone": TONE_CLASSES[top2_idx[1].item()],
                         "top2_conf": top2_prob[1].item() * 100,
                         "status": "success",
-                        "chroma_plot": chroma_plot # Có thể lưu để vẽ lại nếu cần
+                        "chroma_plot": chroma_plot
                     }
                 except Exception as e:
-                    st.session_state.predictions[file_name] = {"status": "error", "message": str(e)}
+                    st.session_state.predictions[cache_key] = {"status": "error", "message": str(e)}
             
             progress_bar.progress((i + 1) / len(uploaded_files))
             
@@ -178,14 +295,15 @@ if uploaded_files:
 if st.session_state.predictions and uploaded_files:
     st.markdown("### 📝 Đánh Giá Kết Quả")
     
-    # Tạo Form để thu thập kết quả
     with st.form("evaluation_form"):
-        eval_data = {} # Biến lưu tạm dữ liệu đánh giá
+        eval_data = {} 
         
         for file in uploaded_files:
             file_name = file.name
-            if file_name in st.session_state.predictions:
-                pred_info = st.session_state.predictions[file_name]
+            cache_key = f"{file_name}_{selected_model_name}"
+            
+            if cache_key in st.session_state.predictions:
+                pred_info = st.session_state.predictions[cache_key]
                 
                 if pred_info["status"] == "error":
                     st.error(f"Lỗi phân tích bài {file_name}: {pred_info['message']}")
@@ -203,13 +321,11 @@ if st.session_state.predictions and uploaded_files:
                             f"*(Top 2: {pred_info['top2_tone']} - {pred_info['top2_conf']:.1f}%)*")
                 
                 with col_eval:
-                    # Nút chọn Đúng sai
-                    radio_val = st.radio("Đánh giá mô hình:", ["Đúng", "Sai", "Chưa kiểm tra"], index=2, horizontal=True, key=f"radio_{file_name}")
+                    radio_val = st.radio("Đánh giá mô hình:", ["Đúng", "Sai", "Chưa kiểm tra"], index=2, horizontal=True, key=f"radio_{cache_key}")
                     
-                    # Nếu chọn Sai, hiển thị box chọn Key chuẩn
-                    actual_key = pred_info['top1_tone'] # Mặc định là key dự đoán
+                    actual_key = pred_info['top1_tone'] 
                     if radio_val == "Sai":
-                        actual_key = st.selectbox("Chọn Tone chuẩn xác:", TONE_CLASSES, key=f"correct_{file_name}")
+                        actual_key = st.selectbox("Chọn Tone chuẩn xác:", TONE_CLASSES, key=f"correct_{cache_key}")
                     
                     eval_data[file_name] = {
                         "Dự đoán": pred_info['top1_tone'],
@@ -224,7 +340,6 @@ if st.session_state.predictions and uploaded_files:
 if 'submitted' in locals() and submitted:
     st.markdown("### 📈 Bảng Thống Kê Tổng Hợp")
     
-    # Lọc ra các bài hát đã được đánh giá (Bỏ qua "Chưa kiểm tra")
     evaluated_records = []
     correct_count = 0
     
@@ -244,22 +359,19 @@ if 'submitted' in locals() and submitted:
     if total_evaluated > 0:
         accuracy = (correct_count / total_evaluated) * 100
         
-        # Hiển thị số liệu tổng quan
         col1, col2, col3 = st.columns(3)
         col1.metric("Tổng số bài đã đánh giá", total_evaluated)
         col2.metric("Số bài dự đoán Đúng", correct_count)
         col3.metric("Độ chính xác (Accuracy)", f"{accuracy:.2f}%")
         
-        # Hiển thị Bảng DataFrame
         df_report = pd.DataFrame(evaluated_records)
         st.dataframe(df_report, use_container_width=True)
         
-        # Nút tải xuống CSV
         csv = df_report.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Tải Báo cáo (CSV)",
             data=csv,
-            file_name='Music_Key_Detection_Report.csv',
+            file_name=f'Report_{selected_model_name.replace(" ", "_")}.csv',
             mime='text/csv',
         )
     else:
