@@ -21,7 +21,7 @@ TONE_CLASSES = [
 ]
 N_CLASSES = len(TONE_CLASSES)
 
-# Định nghĩa 3 mô hình (Sửa tên file .pth cho khớp với file trên Github của bạn)
+# Định nghĩa 3 mô hình theo đúng cấu hình của bạn
 MODELS_CONFIG = {
     "CRNN (Toàn bài)": "key_detector_crnn_fullbai_v2.pth",
     "CNN (30s Đầu)": "model_CNN_30fs.pth",
@@ -36,6 +36,7 @@ if 'predictions' not in st.session_state:
 # 2. ĐỊNH NGHĨA KIẾN TRÚC CÁC MẠNG NƠ-RON
 # ═══════════════════════════════════════════════════════════
 
+# ---- MẠNG CNN 13 BINS CỤC BỘ ----
 class KeyCNN_13Bins(nn.Module):
     def __init__(self):
         super().__init__()
@@ -45,18 +46,17 @@ class KeyCNN_13Bins(nn.Module):
             nn.Conv2d(32, 32, kernel_size=(3, 3), padding=1),
             nn.BatchNorm2d(32), nn.ELU(inplace=True),
             nn.MaxPool2d(kernel_size=(1, 2)),
-
+            
             nn.Conv2d(32, 64, kernel_size=(3, 3), padding=1),
             nn.BatchNorm2d(64), nn.ELU(inplace=True),
             nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
             nn.BatchNorm2d(64), nn.ELU(inplace=True),
             nn.MaxPool2d(kernel_size=(1, 2)), 
-
-            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
-            nn.BatchNorm2d(64), nn.ELU(inplace=True),
-            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
-            nn.BatchNorm2d(64), nn.ELU(inplace=True),
             
+            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(64), nn.ELU(inplace=True),
+            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=1),
+            nn.BatchNorm2d(64), nn.ELU(inplace=True),
             nn.AdaptiveAvgPool2d((13, 1)),
         )
         self.head = nn.Sequential(
@@ -72,6 +72,7 @@ class KeyCNN_13Bins(nn.Module):
             x = x.permute(0, 1, 3, 2)
         return self.head(self.features(x))
 
+# ---- LỚP ATTENTION CHO CRNN ----
 class SelfAttention(nn.Module):
     def __init__(self, hidden_size):
         super().__init__()
@@ -85,6 +86,7 @@ class SelfAttention(nn.Module):
         attn_weights = torch.softmax(attn_weights, dim=1)
         return torch.sum(attn_weights * lstm_outputs, dim=1)
 
+# ---- MẠNG CRNN V3 (CÓ ATTENTION - 13 BINS) ----
 class KeyCRNN_Attention(nn.Module):
     def __init__(self):
         super().__init__()
@@ -118,6 +120,7 @@ class KeyCRNN_Attention(nn.Module):
         x = self.attention(x)
         return self.head(x)
 
+# ---- MẠNG CRNN V2 CŨ (KHÔNG ATTENTION - 25 BINS) ----
 class KeyCRNN_V2(nn.Module):
     def __init__(self):
         super().__init__()
@@ -164,6 +167,7 @@ def load_model(model_name):
         
         req_bins = 13
         
+        # Auto-detect kiến trúc thông minh
         if "CRNN" in model_name:
             has_attention = any("attention" in k for k in clean_state_dict.keys())
             if has_attention:
@@ -181,18 +185,25 @@ def load_model(model_name):
         return None, model_path, 13, f"Lỗi nạp trọng số: {e}"
 
 # ═══════════════════════════════════════════════════════════
-# 4. HÀM TRÍCH XUẤT ĐẶC TRƯNG DSP ĐỘNG
+# 4. HÀM TRÍCH XUẤT ĐẶC TRƯNG DSP ĐỘNG (TỐI ƯU HÓA SLICING)
 # ═══════════════════════════════════════════════════════════
 def process_audio(file_bytes, model_name, req_bins):
-    duration = 30 if "30s Đầu" in model_name else 60
-    
-    y, sr = librosa.load(file_bytes, sr=22050, mono=True, duration=duration)
-    
-    if "30s Cuối" in model_name and len(y) > 30 * sr:
-        y = y[-(30 * sr):]
+    # Lọc thời gian chính xác cho từng loại mô hình
+    if "30s Đầu" in model_name:
+        y, sr = librosa.load(file_bytes, sr=22050, mono=True, duration=30.0)
+    elif "30s Cuối" in model_name:
+        # Load toàn bài để lấy được Outro chuẩn xác nhất
+        y, sr = librosa.load(file_bytes, sr=22050, mono=True, duration=None)
+        if len(y) > 30 * sr:
+            y = y[-(30 * sr):]
+    else:
+        # CRNN (Toàn bài) - Giữ nguyên 60s như code cũ của bạn
+        y, sr = librosa.load(file_bytes, sr=22050, mono=True, duration=60.0)
 
+    # HPSS Lọc tạp âm
     y_harm = librosa.effects.harmonic(y, margin=4)
     
+    # Ma trận 13 Bins
     chroma_full = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=512, bins_per_octave=36)
     mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, hop_length=512)
     mel_mean = librosa.power_to_db(mel, ref=np.max).mean(axis=0, keepdims=True)
@@ -203,6 +214,7 @@ def process_audio(file_bytes, model_name, req_bins):
     else:
         feat = np.concatenate([chroma_full, mel_mean], axis=0).astype(np.float32)
         
+    # Min-Max Normalization
     for i in range(feat.shape[0]):
         mn, mx = feat[i].min(), feat[i].max()
         if mx > mn: 
